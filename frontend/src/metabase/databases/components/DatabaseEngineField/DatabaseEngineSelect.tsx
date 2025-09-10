@@ -32,6 +32,9 @@ const DatabaseEngineSelect = ({
       onChange={handleChange}
       mb="md"
       searchable
+      labelProps={{
+        mb: "sm",
+      }}
     />
   );
 };

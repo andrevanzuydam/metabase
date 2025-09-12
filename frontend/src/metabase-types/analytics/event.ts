@@ -337,6 +337,17 @@ export type DocumentPrintEvent = ValidateEvent<{
   target_id: number | null;
 }>;
 
+export type XRayClickedEvent = ValidateEvent<{
+  event: "x-ray_clicked";
+  triggered_from: "homepage" | "browse_database" | "suggestion_sidebar";
+}>;
+
+export type XRaySavedEvent = ValidateEvent<{
+  event: "x-ray_saved";
+}>;
+
+export type XRayEvent = XRayClickedEvent | XRaySavedEvent;
+
 export type EmbedWizardEvent =
   | EmbedWizardExperienceSelectedEvent
   | EmbedWizardResourceSelectedEvent
@@ -392,4 +403,5 @@ export type SimpleEvent =
   | DocumentCreatedEvent
   | DocumentReplaceCardEvent
   | DocumentUpdatedEvent
-  | DocumentPrintEvent;
+  | DocumentPrintEvent
+  | XRayEvent;

@@ -697,54 +697,53 @@
             (is (contains? result :output) "Should have output")
             (is (contains? result :output-manifest) "Should have output manifest"))
 
-          (when result
-            (let [lines (str/split-lines (:output result))
-                  rows (map json/decode lines)
-                  metadata (:output-manifest result)
-                  headers (map :name (:fields metadata))]
+          (let [lines (str/split-lines (:output result))
+                rows (map json/decode lines)
+                metadata (:output-manifest result)
+                headers (map :name (:fields metadata))]
 
-              (testing "Exotic data processed correctly"
-                (is (= 4 (count rows)) "Should have 4 rows")
-                (is (> (count headers) 13) "Should have computed columns")
+            (testing "Exotic data processed correctly"
+              (is (= 4 (count rows)) "Should have 4 rows")
+              (is (> (count headers) 13) "Should have computed columns")
 
-                (is (contains? (set headers) "has_ipv6") "Should have IPv6 detection")
-                (is (contains? (set headers) "money_doubled") "Should have money calculations")
-                (is (contains? (set headers) "has_coords") "Should have geometric operations"))
+              (is (contains? (set headers) "has_ipv6") "Should have IPv6 detection")
+              (is (contains? (set headers) "money_doubled") "Should have money calculations")
+              (is (contains? (set headers) "has_coords") "Should have geometric operations"))
 
-              (testing "Type preservation for exotic types"
-                (let [type-map (u/for-map [{:keys [name base_type]} (:fields metadata)]
-                                 [name (keyword "type" base_type)])]
+            (testing "Type preservation for exotic types"
+              (let [type-map (u/for-map [{:keys [name base_type]} (:fields metadata)]
+                               [name (keyword "type" base_type)])]
 
-                  (is (isa? (type-map "inet_field") :type/IPAddress))
-                  (is (isa? (type-map "money_field") :type/Float))
+                (is (isa? (type-map "inet_field") :type/IPAddress))
+                (is (isa? (type-map "money_field") :type/Float))
 
-                  ;; (is (isa? (type-map "int_array") :type/Array))
+                ;; (is (isa? (type-map "int_array") :type/Array))
 
-                  (is (= :type/Boolean (type-map "has_ipv6")))
-                  (is (isa? (type-map "money_doubled") :type/Float))))
+                (is (= :type/Boolean (type-map "has_ipv6")))
+                (is (isa? (type-map "money_doubled") :type/Float))))
 
-              (testing "Actual data transformations are correct"
-                (let [[row1 row2 row3 row4] rows]
-                  ;; Row 1: IPv4 address, should not have IPv6 detection
-                  (is (= 1 (get row1 "id")))
-                  (is (= false (get row1 "has_ipv6")) "IPv4 address should not be detected as IPv6")
-                  (is (true? (get row1 "is_private")) "192.168.x.x should be detected as private")
-                  (is (> (get row1 "money_doubled") 2000) "Money field should be doubled")
+            (testing "Actual data transformations are correct"
+              (let [[row1 row2 row3 row4] rows]
+                ;; Row 1: IPv4 address, should not have IPv6 detection
+                (is (= 1 (get row1 "id")))
+                (is (= false (get row1 "has_ipv6")) "IPv4 address should not be detected as IPv6")
+                (is (true? (get row1 "is_private")) "192.168.x.x should be detected as private")
+                (is (> (get row1 "money_doubled") 2000) "Money field should be doubled")
 
-                  ;; Row 2: IPv6 address, should have IPv6 detection
-                  (is (= 2 (get row2 "id")))
-                  (is (true? (get row2 "has_ipv6")) "IPv6 address should be detected")
-                  (is (= false (get row2 "is_private")) "IPv6 address should not be detected as private IPv4")
-                  (is (< (get row2 "money_doubled") -1000000) "Negative money should be doubled to larger negative")
+                ;; Row 2: IPv6 address, should have IPv6 detection
+                (is (= 2 (get row2 "id")))
+                (is (true? (get row2 "has_ipv6")) "IPv6 address should be detected")
+                (is (= false (get row2 "is_private")) "IPv6 address should not be detected as private IPv4")
+                (is (< (get row2 "money_doubled") -1000000) "Negative money should be doubled to larger negative")
 
-                  ;; Row 3: IPv4 private address
-                  (is (= 3 (get row3 "id")))
-                  (is (= false (get row3 "has_ipv6")) "IPv4 10.x.x.x should not be IPv6")
+                ;; Row 3: IPv4 private address
+                (is (= 3 (get row3 "id")))
+                (is (= false (get row3 "has_ipv6")) "IPv4 10.x.x.x should not be IPv6")
 
-                  ;; Row 4: All nulls should have default/null handling
-                  (is (= 4 (get row4 "id")))
-                  (is (= false (get row4 "has_ipv6")) "Null should default to false")
-                  (is (= false (get row4 "is_private")) "Null should default to false")))))
+                ;; Row 4: All nulls should have default/null handling
+                (is (= 4 (get row4 "id")))
+                (is (= false (get row4 "has_ipv6")) "Null should default to false")
+                (is (= false (get row4 "is_private")) "Null should default to false"))))
 
           ;; Cleanup
           (cleanup-table! table-id))))))
@@ -811,13 +810,12 @@
           (testing "MySQL exotic transform succeeded"
             (is (some? result) "MySQL transform should succeed"))
 
-          (when result
-            (testing "MySQL exotic types processed"
-              (let [metadata (:output-manifest result)
-                    headers (map :name (:fields metadata))]
-                (is (contains? (set headers) "json_has_nested"))
-                (is (contains? (set headers) "enum_size_category"))
-                (is (contains? (set headers) "bit_is_max")))))
+          (testing "MySQL exotic types processed"
+            (let [metadata (:output-manifest result)
+                  headers (map :name (:fields metadata))]
+              (is (contains? (set headers) "json_has_nested"))
+              (is (contains? (set headers) "enum_size_category"))
+              (is (contains? (set headers) "bit_is_max"))))
 
           (cleanup-table! table-id))))))
 
@@ -880,13 +878,12 @@
             (testing "MariaDB exotic transform succeeded"
               (is (some? result) "MariaDB transform should succeed"))
 
-            (when result
-              (testing "MariaDB exotic types processed"
-                (let [metadata (:output-manifest result)
-                      headers (map :name (:fields metadata))]
-                  (is (contains? (set headers) "json_has_mariadb"))
-                  (is (contains? (set headers) "uuid_is_nil"))
-                  (is (contains? (set headers) "inet4_is_private")))))
+            (testing "MariaDB exotic types processed"
+              (let [metadata (:output-manifest result)
+                    headers (map :name (:fields metadata))]
+                (is (contains? (set headers) "json_has_mariadb"))
+                (is (contains? (set headers) "uuid_is_nil"))
+                (is (contains? (set headers) "inet4_is_private"))))
 
             (cleanup-table! table-id)))))))
 
@@ -961,18 +958,15 @@
               result (execute! {:code transform-code
                                 :tables {table-name table-id}})]
 
-          (def k result)
-
           (testing "BigQuery exotic transform succeeded"
             (is (some? result) "BigQuery transform should succeed"))
 
-          (when result
-            (testing "BigQuery exotic types processed"
-              (let [metadata (:output-manifest result)
-                    headers (map :name (:fields metadata))]
-                (is (contains? (set headers) "struct_has_name"))
-                (is (contains? (set headers) "is_point"))
-                (is (contains? (set headers) "has_large_number")))))
+          (testing "BigQuery exotic types processed"
+            (let [metadata (:output-manifest result)
+                  headers (map :name (:fields metadata))]
+              (is (contains? (set headers) "struct_has_name"))
+              (is (contains? (set headers) "is_point"))
+              (is (contains? (set headers) "has_large_number"))))
 
           (cleanup-table! table-id))))))
 
@@ -1041,13 +1035,12 @@
           (testing "Snowflake exotic transform succeeded"
             (is (some? result) "Snowflake transform should succeed"))
 
-          (when result
-            (testing "Snowflake exotic types processed"
-              (let [metadata (:output-manifest result)
-                    headers (map :name (:fields metadata))]
-                (is (contains? (set headers) "variant_is_complex"))
-                (is (contains? (set headers) "is_point_geo"))
-                (is (contains? (set headers) "is_huge_number")))))
+          (testing "Snowflake exotic types processed"
+            (let [metadata (:output-manifest result)
+                  headers (map :name (:fields metadata))]
+              (is (contains? (set headers) "variant_is_complex"))
+              (is (contains? (set headers) "is_point_geo"))
+              (is (contains? (set headers) "is_huge_number"))))
 
           (cleanup-table! table-id))))))
 
@@ -1116,13 +1109,12 @@
           (testing "ClickHouse exotic transform succeeded"
             (is (some? result) "ClickHouse transform should succeed"))
 
-          (when result
-            (testing "ClickHouse exotic types processed"
-              (let [metadata (:output-manifest result)
-                    headers (map :name (:fields metadata))]
-                (is (contains? (set headers) "array_has_positive"))
-                (is (contains? (set headers) "ipv4_is_private"))
-                (is (contains? (set headers) "uuid_is_null")))))
+          (testing "ClickHouse exotic types processed"
+            (let [metadata (:output-manifest result)
+                  headers (map :name (:fields metadata))]
+              (is (contains? (set headers) "array_has_positive"))
+              (is (contains? (set headers) "ipv4_is_private"))
+              (is (contains? (set headers) "uuid_is_null"))))
 
           (cleanup-table! table-id))))))
 

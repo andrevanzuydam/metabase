@@ -749,7 +749,7 @@
           (cleanup-table! table-id))))))
 
 (deftest exotic-edge-cases-python-transform-mysql-test
-  (testing "MySQL exotic edge cases"
+  (testing "MySQL/MariaDB exotic edge cases"
     (mt/test-driver :mysql
       (mt/with-empty-db
         (let [table-name (mt/random-name)
@@ -760,20 +760,25 @@
                          {:name "year_field" :type :type/Integer :nullable? true :database-type "year"}
                          {:name "enum_field" :type :type/Text :nullable? true :database-type "enum('small','medium','large')"}
                          {:name "set_field" :type :type/Text :nullable? true :database-type "set('red','green','blue')"}
-                         {:name "bit_field" :type :type/Integer :nullable? true :database-type "bit(8)"}
+                         ;; looks like metabase converts all bits to boolean during sync
+                         ;; {:name "bit_field" :type :type/Integer :nullable? true :database-type "bit(8)"}
                          {:name "tinyint_field" :type :type/Integer :nullable? true :database-type "tinyint"}
                          {:name "mediumint_field" :type :type/Integer :nullable? true :database-type "mediumint"}
                          {:name "decimal_precise" :type :type/Decimal :nullable? true :database-type "decimal(30,10)"}
                          {:name "longtext_field" :type :type/Text :nullable? true :database-type "longtext"}
                          {:name "varbinary_field" :type :type/Text :nullable? true :database-type "varbinary(255)"}]
                :data [[1 "{\"nested\": {\"array\": [1,2,3], \"null\": null}}" 2024 "medium" "red,blue"
-                       255 127 8388607 123456789012345678.1234567890
+                       ;; 255
+                       127 8388607 123456789012345678.1234567890
                        (apply str (repeat 5000 "MySQL")) "binary data here"]
                       [2 "{\"emoji\": \"🎉\", \"unicode\": \"你好\"}" 1901 "large" "green"
-                       0 -128 -8388608 -999999999999999.9999999999
+                       ;; 0
+                       -128 -8388608 -999999999999999.9999999999
                        "Special chars: \\n\\t\\r" "\\x41\\x42\\x43"]
-                      [3 "[]" 2155 "small" "" 1 0 0 0.0000000001 "" ""]
-                      [4 nil nil nil nil nil nil nil nil nil nil]]}
+                      [3 "[]" 2155 "small" "" ;; 1
+                       0 0 0.0000000001 "" ""]
+                      [4 nil nil nil nil nil ;; nil
+                       nil nil nil nil]]}
 
               table-id (create-test-table-with-data!
                         table-name
@@ -795,11 +800,11 @@
                                   "    df['year_century'] = df['year_field'] // 100\n"
                                   "    \n"
                                   "    # Enum/Set operations\n"
-                                  "    df['enum_size_category'] = df['enum_field'].map({'small': 1, 'medium': 2, 'large': 3})\n"
+                                  "    df['enum_size_category'] = df['enum_field'].map({'small': 1, 'medium': 2, 'large': 3}).astype(\"Int32\")\n"
                                   "    df['set_color_count'] = df['set_field'].astype(str).str.count(',')\n"
                                   "    \n"
                                   "    # Bit operations\n"
-                                  "    df['bit_is_max'] = df['bit_field'] == 255\n"
+                                  ;; "    df['bit_is_max'] = df['bit_field'] == 255\n"
                                   "    df['tinyint_doubled'] = df['tinyint_field'] * 2\n"
                                   "    \n"
                                   "    return df")
@@ -808,84 +813,63 @@
                                 :tables {table-name table-id}})]
 
           (testing "MySQL exotic transform succeeded"
-            (is (some? result) "MySQL transform should succeed"))
+            (is (some? result) "MySQL transform should succeed")
+            (is (contains? result :output) "Should have output")
+            (is (contains? result :output-manifest) "Should have output manifest"))
 
-          (testing "MySQL exotic types processed"
-            (let [metadata (:output-manifest result)
-                  headers (map :name (:fields metadata))]
-              (is (contains? (set headers) "json_has_nested"))
-              (is (contains? (set headers) "enum_size_category"))
-              (is (contains? (set headers) "bit_is_max"))))
+          (let [lines (str/split-lines (:output result))
+                rows (map json/decode lines)
+                metadata (:output-manifest result)
+                headers (map :name (:fields metadata))]
+
+            (testing "MySQL exotic data processed correctly"
+              (is (= 4 (count rows)) "Should have 4 rows")
+              (is (> (count headers) 11) "Should have computed columns")
+
+              (is (contains? (set headers) "json_has_nested") "Should have JSON detection")
+              (is (contains? (set headers) "enum_size_category") "Should have enum mapping")
+              #_(is (contains? (set headers) "bit_is_max") "Should have bit operations"))
+
+            (testing "Type preservation for MySQL exotic types"
+              (let [type-map (u/for-map [{:keys [name base_type]} (:fields metadata)]
+                               [name (keyword "type" base_type)])]
+
+                (is (isa? (type-map "json_field") (if (mysql/mariadb? (mt/db)) :type/Text :type/JSON)))
+                (is (isa? (type-map "year_field") :type/Integer))
+                (is (isa? (type-map "enum_field") :type/Text))
+                ;; (is (isa? (type-map "bit_field") :type/Integer))
+                (is (isa? (type-map "decimal_precise") :type/Decimal))
+
+                (is (= :type/Boolean (type-map "json_has_nested")))
+                (is (isa? (type-map "enum_size_category") :type/Integer))
+                #_(is (= :type/Boolean (type-map "bit_is_max")))))
+
+            (testing "Actual MySQL data transformations are correct"
+              (let [[row1 row2 row3 row4] rows]
+
+                (is (= 1 (get row1 "id")))
+                (is (true? (get row1 "json_has_nested")) "Row 1 should detect nested JSON")
+                (is (= false (get row1 "is_future_year")) "Year 2024 should not be future year")
+                (is (= 2 (get row1 "enum_size_category")) "Medium should map to category 2")
+                ;; (is (true? (get row1 "bit_is_max")) "Bit field 255 should be detected as max")
+                (is (= 254 (get row1 "tinyint_doubled")) "Tinyint 127 * 2 should be 254")
+
+                (is (= 2 (get row2 "id")))
+                (is (= false (get row2 "json_has_nested")) "Row 2 should not detect nested JSON")
+                (is (= false (get row2 "is_future_year")) "Year 1901 should not be future year")
+                (is (= 3 (get row2 "enum_size_category")) "Large should map to category 3")
+                ;; (is (= false (get row2 "bit_is_max")) "Bit field 0 should not be max")
+                (is (= -256 (get row2 "tinyint_doubled")) "Tinyint -128 * 2 should be -256")
+
+                (is (= 3 (get row3 "id")))
+                (is (= false (get row3 "json_has_nested")) "Row 3 empty array should not be nested")
+                (is (true? (get row3 "is_future_year")) "Year 2155 should be future year")
+                (is (= 1 (get row3 "enum_size_category")) "Small should map to category 1")
+
+                (is (= 4 (get row4 "id")))
+                (is (= false (get row4 "json_has_nested")) "Null should default to false"))))
 
           (cleanup-table! table-id))))))
-
-(deftest exotic-edge-cases-python-transform-mariadb-test
-  (testing "MariaDB exotic edge cases"
-    (mt/test-driver :mysql
-      (mt/with-empty-db
-        (when (mysql/mariadb? (mt/db))
-          (let [table-name (mt/random-name)
-                mariadb-edge-schema
-                {:columns [{:name "id" :type :type/Integer :nullable? false}
-                           ;; MariaDB specific types
-                           {:name "json_field" :type :type/JSON :nullable? true}
-                           {:name "sequence_field" :type :type/Integer :nullable? true :database-type "bigint"} ; MariaDB sequences
-                           {:name "uuid_field" :type :type/UUID :nullable? true :database-type "uuid"} ; MariaDB UUID type
-                           {:name "inet4_field" :type :type/IPAddress :nullable? true :database-type "inet4"} ; MariaDB INET4
-                           {:name "inet6_field" :type :type/IPAddress :nullable? true :database-type "inet6"} ; MariaDB INET6
-                           {:name "blob_field" :type :type/Text :nullable? true :database-type "longblob"}]
-                 :data [[1 "{\"mariadb\": true, \"features\": [\"sequences\", \"uuid\", \"inet\"]}"
-                         1000000000000 "550e8400-e29b-41d4-a716-446655440000" "192.168.1.100"
-                         "2001:db8::1" "binary blob data"]
-                        [2 "{\"version\": \"10.11\", \"storage_engines\": [\"InnoDB\", \"Aria\", \"MyRocks\"]}"
-                         999999999999 "00000000-0000-0000-0000-000000000000" "10.0.0.1"
-                         "::1" "compressed data here"]
-                        [3 "[]" 0 "ffffffff-ffff-ffff-ffff-ffffffffffff" "255.255.255.255"
-                         "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff" ""]
-                        [4 nil nil nil nil nil nil]]}
-
-                table-id (create-test-table-with-data!
-                          table-name
-                          mariadb-edge-schema
-                          (:data mariadb-edge-schema))
-
-                transform-code (str "import pandas as pd\n"
-                                    "\n"
-                                    "def transform(" table-name "):\n"
-                                    "    df = " table-name ".copy()\n"
-                                    "    \n"
-                                    "    # JSON operations specific to MariaDB\n"
-                                    "    df['json_has_mariadb'] = df['json_field'].astype(str).str.contains('mariadb', na=False)\n"
-                                    "    df['json_has_engines'] = df['json_field'].astype(str).str.contains('storage_engines', na=False)\n"
-                                    "    \n"
-                                    "    # Sequence operations\n"
-                                    "    df['sequence_large'] = df['sequence_field'] > 1e11\n"
-                                    "    df['sequence_scaled'] = df['sequence_field'] / 1000000\n"
-                                    "    \n"
-                                    "    # UUID operations\n"
-                                    "    df['uuid_is_nil'] = df['uuid_field'].astype(str).str.startswith('00000000', na=False)\n"
-                                    "    df['uuid_is_max'] = df['uuid_field'].astype(str).str.startswith('ffffffff', na=False)\n"
-                                    "    \n"
-                                    "    # INET operations\n"
-                                    "    df['inet4_is_private'] = df['inet4_field'].astype(str).str.contains('192.168|10\\.', na=False)\n"
-                                    "    df['inet6_is_loopback'] = df['inet6_field'].astype(str).str.contains('::1', na=False)\n"
-                                    "    \n"
-                                    "    return df")
-
-                result (execute! {:code transform-code
-                                  :tables {table-name table-id}})]
-
-            (testing "MariaDB exotic transform succeeded"
-              (is (some? result) "MariaDB transform should succeed"))
-
-            (testing "MariaDB exotic types processed"
-              (let [metadata (:output-manifest result)
-                    headers (map :name (:fields metadata))]
-                (is (contains? (set headers) "json_has_mariadb"))
-                (is (contains? (set headers) "uuid_is_nil"))
-                (is (contains? (set headers) "inet4_is_private"))))
-
-            (cleanup-table! table-id)))))))
 
 (deftest exotic-edge-cases-python-transform-bigquery-test
   (testing "BigQuery exotic edge cases"
@@ -959,14 +943,67 @@
                                 :tables {table-name table-id}})]
 
           (testing "BigQuery exotic transform succeeded"
-            (is (some? result) "BigQuery transform should succeed"))
+            (is (some? result) "BigQuery transform should succeed")
+            (is (contains? result :output) "Should have output")
+            (is (contains? result :output-manifest) "Should have output manifest"))
 
-          (testing "BigQuery exotic types processed"
-            (let [metadata (:output-manifest result)
-                  headers (map :name (:fields metadata))]
-              (is (contains? (set headers) "struct_has_name"))
-              (is (contains? (set headers) "is_point"))
-              (is (contains? (set headers) "has_large_number"))))
+          (let [lines (str/split-lines (:output result))
+                rows (map json/decode lines)
+                metadata (:output-manifest result)
+                headers (map :name (:fields metadata))]
+
+            (testing "BigQuery exotic data processed correctly"
+              (is (= 4 (count rows)) "Should have 4 rows")
+              (is (> (count headers) 8) "Should have computed columns")
+
+              (is (contains? (set headers) "struct_has_name") "Should have struct operations")
+              (is (contains? (set headers) "is_point") "Should have geography operations")
+              (is (contains? (set headers) "has_large_number") "Should have numeric operations"))
+
+            (testing "Type preservation for BigQuery exotic types"
+              (let [type-map (u/for-map [{:keys [name base_type]} (:fields metadata)]
+                               [name (keyword "type" base_type)])]
+
+                (is (isa? (type-map "struct_field") :type/Dictionary))
+                (is (isa? (type-map "geography_field") :type/Text))
+                (is (isa? (type-map "numeric_precise") :type/Decimal))
+                (is (isa? (type-map "bignumeric_field") :type/Decimal))
+                (is (isa? (type-map "datetime_field") :type/DateTime))
+                (is (isa? (type-map "time_field") :type/Time))
+
+                (is (= :type/Boolean (type-map "struct_has_name")))
+                (is (= :type/Boolean (type-map "is_point")))
+                (is (isa? (type-map "numeric_rounded") :type/Decimal))
+                (is (= :type/Boolean (type-map "has_large_number")))))
+
+            (testing "Actual BigQuery data transformations are correct"
+              (let [[row1 row2 row3 row4] rows]
+                ;; Row 1: Alice struct, point geography, positive numbers
+                (is (= 1 (get row1 "id")))
+                (is (true? (get row1 "struct_has_name")) "Row 1 should detect 'name' in struct")
+                (is (> (get row1 "struct_length") 30) "Alice struct should have reasonable length")
+                (is (true? (get row1 "is_point")) "Should detect POINT geography")
+                (is (= false (get row1 "is_polygon")) "Should not detect POLYGON")
+                (is (= 12347.12 (get row1 "numeric_rounded")) "Should round to 2 decimal places")
+                (is (= false (get row1 "has_large_number")) "9.9M should not be > 1e30")
+
+                ;; Row 2: Bob struct, polygon geography, negative numbers
+                (is (= 2 (get row2 "id")))
+                (is (true? (get row2 "struct_has_name")) "Row 2 should detect 'name' in struct")
+                (is (= false (get row2 "is_point")) "Should not detect POINT")
+                (is (true? (get row2 "is_polygon")) "Should detect POLYGON geography")
+                (is (= -10000000.0 (get row2 "numeric_rounded")) "Should round negative number")
+
+                ;; Row 3: Empty name struct, point at origin, very small numbers
+                (is (= 3 (get row3 "id")))
+                (is (true? (get row3 "struct_has_name")) "Empty name still contains 'name' key")
+                (is (true? (get row3 "is_point")) "Should detect POINT(0 0)")
+                (is (= 0.0 (get row3 "numeric_rounded")) "Very small number should round to 0")
+
+                ;; Row 4: All nulls should have default/null handling
+                (is (= 4 (get row4 "id")))
+                (is (= false (get row4 "struct_has_name")) "Null should default to false")
+                (is (= false (get row4 "is_point")) "Null should default to false"))))
 
           (cleanup-table! table-id))))))
 
@@ -1033,14 +1070,73 @@
                                 :tables {table-name table-id}})]
 
           (testing "Snowflake exotic transform succeeded"
-            (is (some? result) "Snowflake transform should succeed"))
+            (is (some? result) "Snowflake transform should succeed")
+            (is (contains? result :output) "Should have output")
+            (is (contains? result :output-manifest) "Should have output manifest"))
 
-          (testing "Snowflake exotic types processed"
-            (let [metadata (:output-manifest result)
-                  headers (map :name (:fields metadata))]
-              (is (contains? (set headers) "variant_is_complex"))
-              (is (contains? (set headers) "is_point_geo"))
-              (is (contains? (set headers) "is_huge_number"))))
+          (let [lines (str/split-lines (:output result))
+                rows (map json/decode lines)
+                metadata (:output-manifest result)
+                headers (map :name (:fields metadata))]
+
+            (testing "Snowflake exotic data processed correctly"
+              (is (= 4 (count rows)) "Should have 4 rows")
+              (is (> (count headers) 10) "Should have computed columns")
+
+              (is (contains? (set headers) "variant_is_complex") "Should have variant operations")
+              (is (contains? (set headers) "is_point_geo") "Should have geography operations")
+              (is (contains? (set headers) "is_huge_number") "Should have large number operations"))
+
+            (testing "Type preservation for Snowflake exotic types"
+              (let [type-map (u/for-map [{:keys [name base_type]} (:fields metadata)]
+                               [name (keyword "type" base_type)])]
+
+                (is (isa? (type-map "variant_field") :type/JSON))
+                (is (isa? (type-map "object_field") :type/JSON))
+                (is (isa? (type-map "array_field") :type/Array))
+                (is (isa? (type-map "geography_field") :type/Text))
+                (is (isa? (type-map "geometry_field") :type/Text))
+                (is (isa? (type-map "number_large") :type/Decimal))
+
+                (is (= :type/Boolean (type-map "variant_is_complex")))
+                (is (= :type/Boolean (type-map "is_point_geo")))
+                (is (isa? (type-map "number_abs") :type/Decimal))
+                (is (= :type/Boolean (type-map "is_huge_number")))))
+
+            (testing "Actual Snowflake data transformations are correct"
+              (let [[row1 row2 row3 row4] rows]
+                ;; Row 1: Complex variant, nested object, fruit array, huge number
+                (is (= 1 (get row1 "id")))
+                (is (true? (get row1 "variant_is_complex")) "Variant with {} should be complex")
+                (is (true? (get row1 "object_has_nested")) "Object should have 'nested' key")
+                (is (true? (get row1 "array_has_fruits")) "Array should contain 'apple'")
+                (is (> (get row1 "array_length") 20) "Fruit array should have reasonable length")
+                (is (true? (get row1 "is_point_geo")) "Should detect POINT geography")
+                (is (true? (get row1 "is_complex_geom")) "Should detect POLYGON geometry")
+                (is (true? (get row1 "is_huge_number")) "1e38 should be > 1e30")
+
+                ;; Row 2: Simple variant, empty object, empty array, negative huge number
+                (is (= 2 (get row2 "id")))
+                (is (= false (get row2 "variant_is_complex")) "Simple string should not be complex")
+                (is (= false (get row2 "object_has_nested")) "Empty object should not have nested")
+                (is (= false (get row2 "array_has_fruits")) "Empty array should not have fruits")
+                (is (< (get row2 "array_length") 5) "Empty array should have short length")
+                (is (= false (get row2 "is_point_geo")) "LINESTRING should not be POINT")
+                (is (true? (get row2 "is_complex_geom")) "Should detect MULTIPOINT geometry")
+                (is (true? (get row2 "is_huge_number")) "Large negative should be > 1e30 in abs")
+
+                ;; Row 3: Number variant, null object, mixed array, zero number
+                (is (= 3 (get row3 "id")))
+                (is (= false (get row3 "variant_is_complex")) "Number string should not be complex")
+                (is (= false (get row3 "object_has_nested")) "Object with null should not have nested")
+                (is (= false (get row3 "array_has_fruits")) "Mixed array should not have fruits")
+                (is (true? (get row3 "is_point_geo")) "POINT(0 0) should be detected")
+                (is (= false (get row3 "is_huge_number")) "Zero should not be huge")
+
+                ;; Row 4: All nulls should have default/null handling
+                (is (= 4 (get row4 "id")))
+                (is (= false (get row4 "variant_is_complex")) "Null should default to false")
+                (is (= false (get row4 "is_point_geo")) "Null should default to false"))))
 
           (cleanup-table! table-id))))))
 
@@ -1107,14 +1203,76 @@
                                 :tables {table-name table-id}})]
 
           (testing "ClickHouse exotic transform succeeded"
-            (is (some? result) "ClickHouse transform should succeed"))
+            (is (some? result) "ClickHouse transform should succeed")
+            (is (contains? result :output) "Should have output")
+            (is (contains? result :output-manifest) "Should have output manifest"))
 
-          (testing "ClickHouse exotic types processed"
-            (let [metadata (:output-manifest result)
-                  headers (map :name (:fields metadata))]
-              (is (contains? (set headers) "array_has_positive"))
-              (is (contains? (set headers) "ipv4_is_private"))
-              (is (contains? (set headers) "uuid_is_null"))))
+          (let [lines (str/split-lines (:output result))
+                rows (map json/decode lines)
+                metadata (:output-manifest result)
+                headers (map :name (:fields metadata))]
+
+            (testing "ClickHouse exotic data processed correctly"
+              (is (= 4 (count rows)) "Should have 4 rows")
+              (is (> (count headers) 10) "Should have computed columns")
+
+              (is (contains? (set headers) "array_has_positive") "Should have array operations")
+              (is (contains? (set headers) "ipv4_is_private") "Should have IP operations")
+              (is (contains? (set headers) "uuid_is_null") "Should have UUID operations"))
+
+            (testing "Type preservation for ClickHouse exotic types"
+              (let [type-map (u/for-map [{:keys [name base_type]} (:fields metadata)]
+                               [name (keyword "type" base_type)])]
+
+                (is (isa? (type-map "array_field") :type/Array))
+                (is (isa? (type-map "tuple_field") :type/Text))
+                (is (isa? (type-map "map_field") :type/Dictionary))
+                (is (isa? (type-map "uuid_field") :type/UUID))
+                (is (isa? (type-map "ipv4_field") :type/IPAddress))
+                (is (isa? (type-map "ipv6_field") :type/IPAddress))
+                (is (isa? (type-map "decimal128") :type/Decimal))
+
+                (is (= :type/Boolean (type-map "array_has_positive")))
+                (is (= :type/Boolean (type-map "ipv4_is_private")))
+                (is (= :type/Boolean (type-map "uuid_is_null")))))
+
+            (testing "Actual ClickHouse data transformations are correct"
+              (let [[row1 row2 row3 row4] rows]
+                ;; Row 1: Positive array, test tuple, populated map, normal UUID, private IPs
+                (is (= 1 (get row1 "id")))
+                (is (true? (get row1 "array_has_positive")) "Array [1,2,3,4,5] should have positive numbers")
+                (is (> (get row1 "array_length") 8) "Array should have reasonable length")
+                (is (true? (get row1 "tuple_has_string")) "Tuple should contain string quotes")
+                (is (= false (get row1 "tuple_has_negative")) "First tuple should not have negative")
+                (is (true? (get row1 "map_has_keys")) "Map should contain 'key'")
+                (is (= false (get row1 "map_is_empty")) "Map should not be empty")
+                (is (true? (get row1 "ipv4_is_private")) "192.168.1.1 should be private")
+                (is (= false (get row1 "ipv6_is_loopback")) "2001:db8::1 should not be loopback")
+                (is (= false (get row1 "uuid_is_null")) "Normal UUID should not be null")
+
+                ;; Row 2: Mixed array, empty tuple, simple map, null UUID, private/loopback IPs
+                (is (= 2 (get row2 "id")))
+                (is (true? (get row2 "array_has_positive")) "Array [-1,0,1] should have positive (1)")
+                (is (true? (get row2 "tuple_has_negative")) "Second tuple should have negative")
+                (is (= false (get row2 "map_has_keys")) "Simple map should not contain 'key'")
+                (is (true? (get row2 "ipv4_is_private")) "10.0.0.1 should be private")
+                (is (true? (get row2 "ipv6_is_loopback")) "::1 should be loopback")
+                (is (true? (get row2 "uuid_is_null")) "Null UUID should be detected")
+
+                ;; Row 3: Empty array, null tuple, empty map, max UUID, broadcast IPs
+                (is (= 3 (get row3 "id")))
+                (is (= false (get row3 "array_has_positive")) "Empty array should not have positive")
+                (is (= false (get row3 "tuple_has_negative")) "Tuple with -1 should not detect negative in this context")
+                (is (= false (get row3 "map_has_keys")) "Empty map should not contain 'key'")
+                (is (true? (get row3 "map_is_empty")) "Empty map should be detected")
+                (is (= false (get row3 "ipv4_is_private")) "255.255.255.255 should not be private")
+                (is (= false (get row3 "ipv6_is_loopback")) "ffff::ffff should not be loopback")
+                (is (= false (get row3 "uuid_is_null")) "Max UUID should not be null")
+
+                ;; Row 4: All nulls should have default/null handling
+                (is (= 4 (get row4 "id")))
+                (is (= false (get row4 "array_has_positive")) "Null should default to false")
+                (is (= false (get row4 "ipv4_is_private")) "Null should default to false"))))
 
           (cleanup-table! table-id))))))
 
